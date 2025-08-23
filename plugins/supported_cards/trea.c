@@ -34,8 +34,6 @@ static MfClassicKeyPair trea_1k_keys[] = {
 const uint8_t verify_sector = 6;
 
 static const char* trea_identify_service_type(const MfClassicData* data) {
-    // Analizza il blocco 24 per identificare il tipo di servizio
-    // Basato sui dump di autolavaggio Carsoli
     
     uint8_t service_indicator = data->block[24].data[7];
     
@@ -67,15 +65,15 @@ void trea_calculateKeys(
     uint8_t* chiaveA,
     uint8_t* chiaveB) {
     
-    // Calcolo della chiave A
-    chiaveA[0] = codiceGestore[0]; // Primo byte chiave A
-    chiaveA[1] = (codiceGestore[0] + 0x02) & 0xFF; // Secondo byte chiave A
-    chiaveA[2] = trea_calculateByte(uid, codiceGestore, 0, 0); // Terzo byte
-    chiaveA[3] = trea_calculateByte(uid, codiceGestore, 1, 0x02); // Quarto byte
-    chiaveA[4] = trea_calculateByte(uid, codiceGestore, 2, 0x04); // Quinto byte
-    chiaveA[5] = trea_calculateByte(uid, codiceGestore, 3, 0x06); // Sesto byte
+    // calcolo della chiave A
+    chiaveA[0] = codiceGestore[0];
+    chiaveA[1] = (codiceGestore[0] + 0x02) & 0xFF;
+    chiaveA[2] = trea_calculateByte(uid, codiceGestore, 0, 0);
+    chiaveA[3] = trea_calculateByte(uid, codiceGestore, 1, 0x02);
+    chiaveA[4] = trea_calculateByte(uid, codiceGestore, 2, 0x04);
+    chiaveA[5] = trea_calculateByte(uid, codiceGestore, 3, 0x06);
 
-    // Calcolo della chiave B invertendo l'ordine di alcuni byte di chiave A
+    // calcolo della chiave B
     chiaveB[0] = chiaveA[2];
     chiaveB[1] = chiaveA[3];
     chiaveB[2] = chiaveA[4];
@@ -100,27 +98,23 @@ static bool trea_read(Nfc* nfc, NfcDevice* device) {
         MfClassicError error = mf_classic_poller_sync_detect_type(nfc, &type);
         if(error != MfClassicErrorNone) break;
 
-        // Get UID and check if it is 4 bytes
         size_t uid_len;
         const uint8_t* uid = mf_classic_get_uid(data, &uid_len);
         FURI_LOG_D(TAG, "UID identified: %02X%02X%02X%02X", uid[0], uid[1], uid[2], uid[3]);
         if(uid_len != UID_LENGTH) break;
 
-        // Prima verifica con chiavi FF se possibile
         uint8_t keyF[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
         MfClassicKey key_default = {0};
         memcpy(key_default.data, keyF, sizeof(keyF));
         
-        // Test autenticazione con chiavi FF sui settori non-critici
         bool __attribute__((unused)) default_auth_works = false;
-        const uint8_t test_block = mf_classic_get_first_block_num_of_sector(1); // Test settore 1
+        const uint8_t test_block = mf_classic_get_first_block_num_of_sector(1);
         MfClassicAuthContext auth_context;
         error = mf_classic_poller_sync_auth(nfc, test_block, &key_default, MfClassicKeyTypeA, &auth_context);
         if(error == MfClassicErrorNone) {
             default_auth_works = true;
         }
 
-        // Bruteforce per trovare le chiavi del settore 6
         bool keys_found = false;
         uint8_t chiaveA[6], chiaveB[6];
         
@@ -138,17 +132,14 @@ static bool trea_read(Nfc* nfc, NfcDevice* device) {
                 FURI_LOG_D(TAG, "TREA keys found with vendor code: %02X", vendor);
                 keys_found = true;
                 
-                // Salva le chiavi generate nella struttura
                 trea_1k_keys[verify_sector].a = bit_lib_bytes_to_num_be(chiaveA, KEY_LENGTH);
                 trea_1k_keys[verify_sector].b = bit_lib_bytes_to_num_be(chiaveB, KEY_LENGTH);
                 break;
             }
         }
 
-        // Se non troviamo le chiavi TREA, non è una carta TREA
         if(!keys_found) break;
 
-        // Prepara tutte le chiavi per la lettura
         MfClassicDeviceKeys keys = {};
         for(size_t i = 0; i < mf_classic_get_total_sectors_num(data->type); i++) {
             bit_lib_num_to_bytes_be(
@@ -182,13 +173,11 @@ static bool trea_parse(const NfcDevice* device, FuriString* parsed_data) {
     bool parsed = false;
 
     do {
-        // Get UID
         size_t uid_len;
         const uint8_t* uid = mf_classic_get_uid(data, &uid_len);
         if(uid_len != UID_LENGTH) break;
 
-        // Verifica che sia una carta TREA testando il settore 6
-        // Riprova il bruteforce per essere sicuri
+        // verifica treA
         bool is_trea = false;
         uint8_t vendor_code = 0;
         uint8_t chiaveA[6], chiaveB[6];
@@ -197,7 +186,6 @@ static bool trea_parse(const NfcDevice* device, FuriString* parsed_data) {
             uint8_t codiceGestore[1] = {vendor};
             trea_calculateKeys(uid, codiceGestore, chiaveA, chiaveB);
 
-            // Verifica se la chiave calcolata corrisponde a quella del settore 6
             MfClassicSectorTrailer* sec_tr = mf_classic_get_sector_trailer_by_sector(data, verify_sector);
             uint64_t stored_key = bit_lib_bytes_to_num_be(sec_tr->key_a.data, 6);
             uint64_t calculated_key = bit_lib_bytes_to_num_be(chiaveA, KEY_LENGTH);
@@ -211,7 +199,7 @@ static bool trea_parse(const NfcDevice* device, FuriString* parsed_data) {
 
         if(!is_trea) break;
 
-        // Header info (UID, ATQA, SAK)
+        // UID, ATQA, SAK
         furi_string_cat_printf(parsed_data, "\e#TREA/Washtec Card\n");
         furi_string_cat_printf(parsed_data, "(Mifare Classic 1k)\n");
         furi_string_cat_printf(parsed_data, "====================\n");
@@ -230,23 +218,23 @@ static bool trea_parse(const NfcDevice* device, FuriString* parsed_data) {
         
         furi_string_cat_printf(parsed_data, "--------------------\n");
 
-        // Credito dal blocco 24 (come da tuo codice originale)
+        // credito attuale
         const uint8_t* block_24_data = data->block[24].data;
         uint16_t balance_from_block_24 = (block_24_data[0] << 8) | block_24_data[1];
 
         furi_string_cat_printf(parsed_data, "-> Credit Available: %d.00\n", balance_from_block_24);
         furi_string_cat_printf(parsed_data, "--------------------\n");
 
-        // Vendor code trovato
+        // vendor code
         furi_string_cat_printf(parsed_data, "Vendor Code: 0x%02X\n", vendor_code);
 
-        // Identifica il tipo di servizio
+        // ttipo di servizio
         const char* service_type = trea_identify_service_type(data);
         furi_string_cat_printf(parsed_data, "Service Type: %s\n", service_type);
 
         furi_string_cat_printf(parsed_data, "--------------------\n");
 
-        // Chiavi generate (solo per debug, opzionale)
+        // chiavi A e B generate
         furi_string_cat_printf(parsed_data, "Key A: ");
         for(size_t i = 0; i < KEY_LENGTH; i++) {
             furi_string_cat_printf(parsed_data, "%02X", chiaveA[i]);
